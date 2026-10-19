@@ -10,6 +10,7 @@ TEST_URL="${ADMIN%/*}/$DB"
 psql "$ADMIN" -qc "CREATE DATABASE $DB"
 trap 'psql "$ADMIN" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null' EXIT
 for f in migrations/*.sql; do psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -f "$f" >/dev/null; done
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -v allowed="" -f checks/ledger_service_members.sql >/dev/null
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -f tests/invariants.sql >/dev/null
 
 # Concurrency 1: 20 parallel gifts (distinct tx) from a wallet funded for only 10.

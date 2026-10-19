@@ -23,8 +23,8 @@ CI uses `contents: read` only; no secrets in the repo; the anti-cheat, web, Andr
 1. Creates a dedicated login role for the trusted server only, e.g. `CREATE ROLE ledger_backend LOGIN PASSWORD '<from secret store>'`.
 2. Runs `GRANT ledger_service TO ledger_backend;`.
 3. Never grants `ledger_service` to `anon`, `authenticated`, or any client-assumable role. Keep credentials out of the repository.
-4. Verifies membership with `supabase/checks/ledger_service_members.sql`, passing the allowed roles:
+4. Verifies role access with `supabase/checks/ledger_service_members.sql`, passing the trusted backend roles:
 
        psql "$DATABASE_URL" -v allowed="ledger_backend" -f supabase/checks/ledger_service_members.sql
 
-The check exits non-zero if `ledger_service` has any member outside the allowed list.
+The check exits non-zero for any unapproved direct or inherited `ledger_service` member, or any unapproved non-superuser with effective execute privileges on protected ledger functions. Database superusers remain privileged by design.

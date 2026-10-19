@@ -111,6 +111,24 @@ SELECT expect((SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
     'family_invite_signature','verify_family_invite_signature')
     AND a.privilege_type='EXECUTE' AND a.grantee NOT IN (p.proowner, 'ledger_service'::regrole)) = 0, 'only owner and ledger_service hold execute');
 SELECT expect(NOT has_function_privilege('ledger_service', 'post_journal(uuid,text,text,jsonb)', 'EXECUTE'), 'post_journal is internal only');
+CREATE ROLE ledger_backend LOGIN INHERIT;
+CREATE ROLE anon NOLOGIN;
+CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE nested_access NOLOGIN;
+CREATE ROLE nested_client NOLOGIN;
+GRANT ledger_service TO ledger_backend;
+\set allowed ledger_backend
+\i checks/ledger_service_members.sql
+GRANT ledger_service TO nested_access;
+GRANT nested_access TO nested_client;
+SELECT expect(has_function_privilege('ledger_backend', 'wallet_process_live_gift(uuid,bigint,bigint,bigint)', 'EXECUTE'),
+  'trusted backend inherits ledger function privileges');
+SELECT expect(NOT has_function_privilege('anon', 'wallet_process_live_gift(uuid,bigint,bigint,bigint)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'wallet_process_live_gift(uuid,bigint,bigint,bigint)', 'EXECUTE'),
+  'client roles cannot execute ledger functions');
+SELECT expect(pg_has_role('nested_client', 'ledger_service', 'MEMBER')
+  AND has_function_privilege('nested_client', 'wallet_process_live_gift(uuid,bigint,bigint,bigint)', 'EXECUTE'),
+  'nested role membership exposes effective access for deployment check');
 
 -- RLS: a non-superuser sees only own family; outsider sees nothing
 DROP ROLE IF EXISTS app_user;
@@ -145,3 +163,7 @@ RESET ROLE;
 RESET ROLE;
 DROP OWNED BY app_user;
 DROP ROLE app_user;
+DROP OWNED BY nested_client;
+DROP OWNED BY nested_access;
+DROP OWNED BY ledger_backend;
+DROP ROLE nested_client, nested_access, authenticated, anon, ledger_backend;
