@@ -41,4 +41,21 @@ done
 wait
 [ -z "$(cat "$OUT"/dup.* )" ] || { echo "FAIL: duplicate retries errored: $(cat "$OUT"/dup.*)"; exit 1; }
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -v tx="$TX" -f tests/concurrency_check.sql >/dev/null
+# Concurrency 3: same tx uuid, 20 DIFFERENT amounts -> exactly one wins, the rest are rejected.
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -c "
+  INSERT INTO accounts(username,email) VALUES ('esender','es@x');
+  SELECT ledger_credit_purchase(gen_random_uuid(), (SELECT id FROM accounts WHERE username='esender'), 10000);" >/dev/null
+TX2=$(psql "$TEST_URL" -Atqc "SELECT gen_random_uuid()")
+for i in $(seq 1 20); do
+  ( if psql "$TEST_URL" -q -c "SELECT wallet_process_live_gift('$TX2',
+      (SELECT id FROM accounts WHERE username='esender'),
+      (SELECT id FROM accounts WHERE username='ccreator'), $((i * 10)))" >/dev/null 2>"$OUT/cf.$i"; then
+      touch "$OUT/cfok.$i"; else touch "$OUT/cffail.$i"; fi ) &
+done
+wait
+OK=$(ls "$OUT" | grep -c '^cfok\.' || true); FAIL=$(ls "$OUT" | grep -c '^cffail\.' || true)
+echo "conflicting-payload race: $OK succeeded, $FAIL rejected"
+[ "$OK" -eq 1 ] && [ "$FAIL" -eq 19 ] || { echo "FAIL: expected 1 success / 19 rejections"; exit 1; }
+for f in "$OUT"/cffail.*; do n=${f##*cffail.}; grep -q "reused with a different request" "$OUT/cf.$n" || { echo "FAIL: unexpected error: $(cat "$OUT/cf.$n")"; exit 1; }; done
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -v tx="$TX2" -f tests/conflict_check.sql >/dev/null
 echo "ALL LEDGER TESTS PASSED"

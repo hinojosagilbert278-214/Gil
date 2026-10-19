@@ -96,6 +96,22 @@ DO $$ DECLARE e timestamptz := date_trunc('second', now() + interval '1 hour'); 
   PERFORM expect(NOT verify_family_invite_signature(1, 5, now() - interval '1 s', family_invite_signature(1, 5, now() - interval '1 s')), 'expired rejected');
 END $$;
 
+-- ledger_service is a server-only role: no login, no privileges, no members, no extra grants
+SELECT expect((SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls
+  FROM pg_roles WHERE rolname='ledger_service'), 'ledger_service is NOLOGIN and unprivileged');
+SELECT expect((SELECT count(*) FROM pg_auth_members WHERE roleid = 'ledger_service'::regrole) = 0, 'ledger_service has no members');
+SELECT expect((SELECT count(*) FROM pg_auth_members WHERE member = 'ledger_service'::regrole) = 0, 'ledger_service is not a member of other roles');
+-- Only ledger_service (and owner) may execute ledger functions; PUBLIC may not.
+SELECT expect((SELECT bool_and(NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+                WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
+  FROM pg_proc p WHERE p.proname IN ('post_journal','ledger_credit_purchase','wallet_process_live_gift','ledger_check_replay',
+    'family_invite_signature','verify_family_invite_signature')), 'no PUBLIC execute on ledger functions');
+SELECT expect((SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
+  WHERE p.proname IN ('post_journal','ledger_check_replay','ledger_credit_purchase','wallet_process_live_gift',
+    'family_invite_signature','verify_family_invite_signature')
+    AND a.privilege_type='EXECUTE' AND a.grantee NOT IN (p.proowner, 'ledger_service'::regrole)) = 0, 'only owner and ledger_service hold execute');
+SELECT expect(NOT has_function_privilege('ledger_service', 'post_journal(uuid,text,text,jsonb)', 'EXECUTE'), 'post_journal is internal only');
+
 -- RLS: a non-superuser sees only own family; outsider sees nothing
 DROP ROLE IF EXISTS app_user;
 CREATE ROLE app_user NOLOGIN;
