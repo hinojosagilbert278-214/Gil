@@ -16,3 +16,15 @@ CI uses `contents: read` only; no secrets in the repo; the anti-cheat, web, Andr
 - Ledger functions are `SECURITY DEFINER`, with `EXECUTE` revoked from `PUBLIC` and granted only to `ledger_service` (the trusted backend role). Clients never call them directly.
 - Each journal entry stores a SHA-256 request fingerprint. Reusing a `transaction_uuid` with different parameters or type raises `unique_violation`.
 - `transactional_outbox.idempotency_key` is unique and inserts use `ON CONFLICT DO NOTHING`.
+
+## Backend role setup (per environment, not in migrations)
+`ledger_service` is a `NOLOGIN` permission group with no members in the migrations. Each deployment:
+
+1. Creates a dedicated login role for the trusted server only, e.g. `CREATE ROLE ledger_backend LOGIN PASSWORD '<from secret store>'`.
+2. Runs `GRANT ledger_service TO ledger_backend;`.
+3. Never grants `ledger_service` to `anon`, `authenticated`, or any client-assumable role. Keep credentials out of the repository.
+4. Verifies membership with `supabase/checks/ledger_service_members.sql`, passing the allowed roles:
+
+       psql "$DATABASE_URL" -v allowed="ledger_backend" -f supabase/checks/ledger_service_members.sql
+
+The check exits non-zero if `ledger_service` has any member outside the allowed list.
