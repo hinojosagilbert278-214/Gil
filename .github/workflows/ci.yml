@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [main, 'copilot/**']
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  ledger-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ${{ github.run_id }}-ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ledger migrations, invariants and concurrency tests
+        env:
+          DATABASE_URL: postgresql://postgres:${{ github.run_id }}-ci-only@localhost:5432/postgres
+        run: bash supabase/tests/run.sh
