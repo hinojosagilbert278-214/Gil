@@ -1,0 +1,8 @@
+{
+  "name": "xtc-super-app",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "test:db": "bash supabase/tests/run.sh"
+  }
+}
