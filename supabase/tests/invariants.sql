@@ -117,6 +117,8 @@ CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE nested_access NOLOGIN;
 CREATE ROLE nested_client NOLOGIN;
 GRANT ledger_service TO ledger_backend;
+\set allowed ledger_backend
+\i checks/ledger_service_members.sql
 GRANT ledger_service TO nested_access;
 GRANT nested_access TO nested_client;
 SELECT expect(has_function_privilege('ledger_backend', 'wallet_process_live_gift(uuid,bigint,bigint,bigint)', 'EXECUTE'),
