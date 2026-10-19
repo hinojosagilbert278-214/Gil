@@ -3,6 +3,7 @@ CREATE TABLE accounts (
   id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   username   VARCHAR(50)  UNIQUE NOT NULL,
   email      VARCHAR(255) UNIQUE NOT NULL,
+  auth_user_id UUID UNIQUE, -- maps the verified Supabase JWT subject to this account
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -46,6 +47,7 @@ INSERT INTO ledger_accounts(kind) VALUES ('TREASURY'), ('EXTERNAL');
 CREATE TABLE journal_entries (
   id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   transaction_uuid UUID UNIQUE NOT NULL,
+  request_fingerprint TEXT NOT NULL,
   entry_type       VARCHAR(50) NOT NULL CHECK (entry_type IN ('WEB_PURCHASE','LIVE_GIFT','SUBSCRIPTION','PAYOUT')),
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -60,6 +62,7 @@ CREATE INDEX journal_lines_entry_idx ON journal_lines(entry_id);
 
 CREATE TABLE transactional_outbox (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
   event_type    VARCHAR(100) NOT NULL,
   payload       JSONB NOT NULL,
   is_dispatched BOOLEAN NOT NULL DEFAULT FALSE,

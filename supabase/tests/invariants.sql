@@ -2,7 +2,7 @@
 CREATE FUNCTION expect(cond BOOLEAN, msg TEXT) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF NOT COALESCE(cond,false) THEN RAISE EXCEPTION 'FAIL: %', msg; END IF; END $$;
 
-INSERT INTO accounts(username,email) VALUES ('leader','l@x'),('creator','c@x'),('fan','f@x'),('solo','s@x'),('outsider','o@x');
+INSERT INTO accounts(username,email,auth_user_id) VALUES ('leader','l@x',gen_random_uuid()),('creator','c@x',gen_random_uuid()),('fan','f@x',gen_random_uuid()),('solo','s@x',gen_random_uuid()),('outsider','o@x',gen_random_uuid());
 INSERT INTO families(name, leader_id) SELECT 'Clan', id FROM accounts WHERE username='leader';
 INSERT INTO family_members(family_id, account_id, clan_branch)
   SELECT (SELECT id FROM families), id, 'STREAM' FROM accounts WHERE username IN ('leader','creator');
@@ -27,6 +27,26 @@ SELECT wallet_process_live_gift('00000000-0000-0000-0000-000000000002', aid('fan
 SELECT expect(bal('fan') = 9000, 'replay is a no-op');
 SELECT expect((SELECT count(*) FROM journal_entries WHERE entry_type='LIVE_GIFT') = 1, 'single entry');
 SELECT expect((SELECT count(*) FROM transactional_outbox) = 1, 'single outbox event');
+
+-- Replay with a different request is rejected
+DO $$ BEGIN
+  BEGIN PERFORM wallet_process_live_gift('00000000-0000-0000-0000-000000000002', aid('fan'), aid('creator'), 999);
+    RAISE EXCEPTION 'FAIL: mismatched replay accepted';
+  EXCEPTION WHEN unique_violation THEN NULL; END;
+  BEGIN PERFORM wallet_process_live_gift('00000000-0000-0000-0000-000000000002', aid('fan'), aid('solo'), 1000);
+    RAISE EXCEPTION 'FAIL: mismatched replay (other creator) accepted';
+  EXCEPTION WHEN unique_violation THEN NULL; END;
+  BEGIN PERFORM ledger_credit_purchase('00000000-0000-0000-0000-000000000002', aid('fan'), 1000);
+    RAISE EXCEPTION 'FAIL: cross-type replay accepted';
+  EXCEPTION WHEN unique_violation THEN NULL; END;
+END $$;
+-- Outbox key is unique
+DO $$ BEGIN
+  BEGIN INSERT INTO transactional_outbox(idempotency_key,event_type,payload)
+    SELECT idempotency_key,'X','{}' FROM transactional_outbox LIMIT 1;
+    RAISE EXCEPTION 'FAIL: duplicate outbox key accepted';
+  EXCEPTION WHEN unique_violation THEN NULL; END;
+END $$;
 
 -- Non-family gift with odd amount: still conserves
 SELECT wallet_process_live_gift('00000000-0000-0000-0000-000000000003', aid('fan'), aid('solo'), 7);
@@ -59,7 +79,7 @@ END $$;
 -- Unbalanced entry rejected at commit
 DO $$ BEGIN
   BEGIN
-    PERFORM post_journal(gen_random_uuid(), 'PAYOUT', jsonb_build_array(
+    PERFORM post_journal(gen_random_uuid(), 'PAYOUT', 'fp', jsonb_build_array(
       jsonb_build_object('ledger_account_id',(SELECT id FROM ledger_accounts WHERE kind='TREASURY'),'amount_micro',-1)));
     SET CONSTRAINTS ALL IMMEDIATE;
     RAISE EXCEPTION 'FAIL: unbalanced accepted';
@@ -79,16 +99,32 @@ END $$;
 -- RLS: a non-superuser sees only own family; outsider sees nothing
 DROP ROLE IF EXISTS app_user;
 CREATE ROLE app_user NOLOGIN;
+GRANT SELECT ON accounts TO app_user;
 GRANT SELECT ON family_members, ledger_accounts, journal_lines TO app_user;
 GRANT EXECUTE ON FUNCTION current_account_id(), my_family_ids() TO app_user;
-CREATE TEMP TABLE ids AS SELECT aid('creator') c, aid('outsider') o;
+CREATE TEMP TABLE ids AS SELECT (SELECT auth_user_id FROM accounts WHERE username='creator') c, (SELECT auth_user_id FROM accounts WHERE username='outsider') o;
 GRANT SELECT ON ids TO app_user;
 SET ROLE app_user;
-SELECT set_config('app.user_id', (SELECT c FROM ids)::text, false);
+SELECT set_config('request.jwt.claim.sub', (SELECT c FROM ids)::text, false);
 SELECT expect((SELECT count(*) FROM family_members) = 2, 'member sees own family');
-SELECT set_config('app.user_id', (SELECT o FROM ids)::text, false);
+SELECT set_config('request.jwt.claim.sub', (SELECT o FROM ids)::text, false);
 SELECT expect((SELECT count(*) FROM family_members) = 0, 'outsider sees no family rows');
 SELECT expect((SELECT count(*) FROM ledger_accounts) = 1, 'outsider sees only own wallet');
+SELECT set_config('request.jwt.claim.sub', 'not-a-uuid', false);
+SELECT expect((SELECT count(*) FROM ledger_accounts) = 0, 'garbage subject sees nothing');
+SELECT set_config('request.jwt.claim.sub', '', false);
+SELECT expect((SELECT count(*) FROM family_members) = 0, 'no subject sees nothing');
+-- Untrusted role cannot post to the ledger or read the invite secret path
+DO $$ BEGIN
+  BEGIN PERFORM wallet_process_live_gift(gen_random_uuid(), 1, 2, 10); RAISE EXCEPTION 'FAIL: app_user executed gift';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN PERFORM post_journal(gen_random_uuid(), 'PAYOUT', 'x', '[]'); RAISE EXCEPTION 'FAIL: app_user executed post_journal';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN PERFORM ledger_credit_purchase(gen_random_uuid(), 1, 10); RAISE EXCEPTION 'FAIL: app_user executed purchase';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN PERFORM family_invite_signature(1, 2, now()); RAISE EXCEPTION 'FAIL: app_user executed invite signing';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+END $$;
 RESET ROLE;
 RESET ROLE;
 DROP OWNED BY app_user;

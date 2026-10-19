@@ -12,15 +12,33 @@ trap 'psql "$ADMIN" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null' E
 for f in migrations/*.sql; do psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -f "$f" >/dev/null; done
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -f tests/invariants.sql >/dev/null
 
-# Concurrency: 20 parallel gifts from one sender with funds for only 10.
+# Concurrency 1: 20 parallel gifts (distinct tx) from a wallet funded for only 10.
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -c "
-  INSERT INTO accounts(username,email) VALUES ('csender','cs@x'),('ccreator','cc@x');
-  SELECT ledger_credit_purchase(gen_random_uuid(), (SELECT id FROM accounts WHERE username='csender'), 1000);" >/dev/null
+  INSERT INTO accounts(username,email) VALUES ('csender','cs@x'),('ccreator','cc@x'),('dsender','ds@x');
+  SELECT ledger_credit_purchase(gen_random_uuid(), (SELECT id FROM accounts WHERE username='csender'), 1000);
+  SELECT ledger_credit_purchase(gen_random_uuid(), (SELECT id FROM accounts WHERE username='dsender'), 1000);" >/dev/null
+OUT=$(mktemp -d)
 for i in $(seq 1 20); do
-  psql "$TEST_URL" -q -c "SELECT wallet_process_live_gift(gen_random_uuid(),
-    (SELECT id FROM accounts WHERE username='csender'),
-    (SELECT id FROM accounts WHERE username='ccreator'), 100)" >/dev/null 2>&1 &
+  ( if psql "$TEST_URL" -q -c "SELECT wallet_process_live_gift(gen_random_uuid(),
+      (SELECT id FROM accounts WHERE username='csender'),
+      (SELECT id FROM accounts WHERE username='ccreator'), 100)" >/dev/null 2>"$OUT/err.$i"; then
+      touch "$OUT/ok.$i"; else touch "$OUT/fail.$i"; fi ) &
 done
 wait
-psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -f tests/concurrency_check.sql >/dev/null
+OK=$(ls "$OUT" | grep -c '^ok\.' || true); FAIL=$(ls "$OUT" | grep -c '^fail\.' || true)
+echo "distinct-tx race: $OK succeeded, $FAIL failed"
+[ "$OK" -eq 10 ] && [ "$FAIL" -eq 10 ] || { echo "FAIL: expected 10 successes / 10 failures"; exit 1; }
+# every failure must be an insufficient-funds check violation
+for f in "$OUT"/fail.*; do n=${f##*fail.}; grep -q "violates check constraint" "$OUT/err.$n" || { echo "FAIL: unexpected error: $(cat "$OUT/err.$n")"; exit 1; }; done
+
+# Concurrency 2: 20 parallel retries of the SAME tx uuid must apply exactly once.
+TX=$(psql "$TEST_URL" -Atqc "SELECT gen_random_uuid()")
+for i in $(seq 1 20); do
+  psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -c "SELECT wallet_process_live_gift('$TX',
+    (SELECT id FROM accounts WHERE username='dsender'),
+    (SELECT id FROM accounts WHERE username='ccreator'), 100)" >/dev/null 2>"$OUT/dup.$i" &
+done
+wait
+[ -z "$(cat "$OUT"/dup.* )" ] || { echo "FAIL: duplicate retries errored: $(cat "$OUT"/dup.*)"; exit 1; }
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -v tx="$TX" -f tests/concurrency_check.sql >/dev/null
 echo "ALL LEDGER TESTS PASSED"

@@ -1,9 +1,17 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Authenticated user id comes from the request-scoped setting `app.user_id`
--- (on Supabase, replace with auth.uid()).
-CREATE FUNCTION current_account_id() RETURNS BIGINT LANGUAGE sql STABLE AS $$
-  SELECT NULLIF(current_setting('app.user_id', true), '')::bigint $$;
+-- Resolves the caller from the verified JWT subject (PostgREST/Supabase set
+-- request.jwt.claim.sub from the signature-checked token; clients cannot set it
+-- because they have no direct SQL access). On Supabase auth.uid() is equivalent.
+-- Unknown or missing subjects resolve to NULL, which matches no rows.
+CREATE FUNCTION current_account_id() RETURNS BIGINT LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+DECLARE v_sub TEXT := NULLIF(current_setting('request.jwt.claim.sub', true), '');
+BEGIN
+  IF v_sub IS NULL THEN RETURN NULL; END IF;
+  RETURN (SELECT id FROM accounts WHERE auth_user_id = v_sub::uuid);
+EXCEPTION WHEN invalid_text_representation THEN RETURN NULL;
+END $$;
 
 -- SECURITY DEFINER avoids recursive RLS evaluation on family_members.
 CREATE FUNCTION my_family_ids() RETURNS SETOF BIGINT LANGUAGE sql STABLE SECURITY DEFINER
@@ -41,3 +49,9 @@ BEGIN
   END LOOP;
   RETURN v_diff = 0;
 END $$;
+
+-- Invite signing/verification are server-side only (they read the secret).
+REVOKE ALL ON FUNCTION family_invite_signature(BIGINT, BIGINT, TIMESTAMPTZ),
+  verify_family_invite_signature(BIGINT, BIGINT, TIMESTAMPTZ, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION family_invite_signature(BIGINT, BIGINT, TIMESTAMPTZ),
+  verify_family_invite_signature(BIGINT, BIGINT, TIMESTAMPTZ, TEXT) TO ledger_service;
